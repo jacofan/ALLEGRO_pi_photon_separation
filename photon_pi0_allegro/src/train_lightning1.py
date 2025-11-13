@@ -47,6 +47,7 @@ def main():
         entity=args.wandb_entity,
         name=args.wandb_displayname,
         log_model="all",
+        save_dir="/gpfs/projects/ehpc399/jfanini/wandb-output",
     )
     # wandb_logger.experiment.config.update(args)
 
