@@ -31,7 +31,7 @@ import pandas as pd
 
 from sklearn.utils.class_weight import compute_class_weight
 
-
+# This is not a wrapper: this is the model!!!
 class ExampleWrapper(L.LightningModule):
     """Example wrapper around a GATr model.
 
@@ -55,42 +55,38 @@ class ExampleWrapper(L.LightningModule):
     ):
         super().__init__()
         self.strict_loading = False
-        self.input_dim = 3
-        self.output_dim = 2
+        self.input_dim = 3      # input points have 3 coord., why? they should be 4 
+        self.output_dim = 2     # output has 2 values (binary classification?)
+
         self.loss_final = 0
         self.number_b = 0
-        self.df_showers = []
-        self.df_showers_pandora = []
-        self.df_showes_db = []
         self.args = args
-        self.m = nn.Sigmoid()
+        self.m = nn.Sigmoid()  # sigmoid activation function (binary class.)
+
         hidden_mv_channels = 16
         hidden_s_channels = 16
         blocks = 8 
         self.gatr = GATr(
-            in_mv_channels=1,
-            out_mv_channels=1,
-            hidden_mv_channels=hidden_mv_channels,
-            in_s_channels=3,
-            out_s_channels=1,
-            hidden_s_channels=hidden_s_channels,
-            num_blocks=blocks,
-            attention=SelfAttentionConfig(),  # Use default parameters for attention
-            mlp=MLPConfig(),  # Use default parameters for MLP
+            in_mv_channels = 1,
+            out_mv_channels = 1,
+            hidden_mv_channels = hidden_mv_channels,
+            in_s_channels = 3,
+            out_s_channels = 1,
+            hidden_s_channels = hidden_s_channels,
+            num_blocks = blocks,
+            attention = SelfAttentionConfig(),  # Use default parameters for attention
+            mlp = MLPConfig(),  # Use default parameters for MLP
         )
-        self.ScaledGooeyBatchNorm2_1 = nn.BatchNorm1d(self.input_dim, momentum=0.1)
-        number_of_classes = 4
-        # self.clustering = nn.Linear(16, number_of_classes, bias=False)
-        self.loss_crit = nn.BCELoss()
-        # self.loss_crit = nn.BCELoss()
+        self.ScaledGooeyBatchNorm2_1 = nn.BatchNorm1d(self.input_dim, momentum = 0.1) #batch normalization
+        self.loss_crit = nn.BCELoss()   # binary cross entropy loss criterio
 
-        self.readout = "sum"
-        self.MLP_layer = MLPReadout(16, 2)
-        self.m = nn.Sigmoid()
 
-    def obtain_loss_weighted(self, labels_true):
-    
-        self.loss_crit = nn.BCELoss()
+        self.readout = "sum"   # sum pooling: add features over all points
+        self.MLP_layer = MLPReadout(16, 2)   # gives the final output
+
+    ## def obtain_loss_weighted(self, labels_true):
+    ## 
+    ##     self.loss_crit = nn.BCELoss()
 
     def forward(self, g, step_count, mask, labels, eval="", return_train=False):
         """Forward pass.
@@ -106,26 +102,58 @@ class ExampleWrapper(L.LightningModule):
             Model prediction: a single scalar for the whole point cloud.
         """
 
-        inputs = g.ndata["h"][:,1:]
+        # node features → transformer → node embeddings → sum pooling → hg → MLP → output
 
-        inputs_scalar = g.ndata["h"][:,0].view(-1, 1)
-        inputs = self.ScaledGooeyBatchNorm2_1(inputs)
+        # g is a graph object, .ndata to access the node features. every node has a feature vector h
+        # tensor of hit position x,y,z 
+        position = g.ndata["h"][:,1:]   
+        # tensor of hit energy
+        # view reshapes the tensor
+        energy = g.ndata["h"][:,0].view(-1, 1)   
 
-        embedded_inputs = embed_point(inputs)   + embed_scalar(inputs_scalar)
-        embedded_inputs = embedded_inputs.unsqueeze(
-            -2
-        )  # (batch_size*num_points, 1, 16)
+        #print("inputs: ", position)
+        #print(position.size())
+        #print("inputs_scalar: ", energy)
+        #print(energy.size())
+
+        # batch normalization for inputs (energy is not normalized)
+        # ACHTUNG: seems not working! Changing  names now works
+        inputs = self.ScaledGooeyBatchNorm2_1(position) 
+
+        #print("scaled: ", inputs)
+
+        #dim: (batch_size*num_points, 16)
+        embedded_inputs = embed_point(inputs) + embed_scalar(energy)
+        #print("embedded_inputs: ", embedded_inputs)
+        #print("size embedded_inputs: ", embedded_inputs.size())
+
+        # dim: (batch_size*num_points, 1, 16)
+        embedded_inputs = embedded_inputs.unsqueeze(-2)  
+
+
+        #print("unsq_embedded_inputs: ", embedded_inputs)
+        #print("size unsq_embedded_inputs: ", embedded_inputs.size())
 
         
-        # Pass data through GATr
+        # Pass data through GATr, _ is thre attention weight (ignored)
         embedded_outputs, _ = self.gatr(
             embedded_inputs, scalars=None, attention_mask=mask
         )  # (..., num_points, 1, 16)
         
+        # new embedding for each node, assigned to the new vector "h_"
+        #dim: (batch_size*num_points, 16)
         g.ndata["h_"] = embedded_outputs[:, 0, :]
+        #print("g.ndata[h_]: ", g.ndata["h_"])
+        #print("size: ", g.ndata["h_"].size())
+        #dim: (batch_size, 16), after sum pooling
         hg = dgl.sum_nodes(g, "h_")
+        #print("hg: ", hg)
+        #print("size: ", hg.size())
 
+        #Multi-layer perceptron, final decision head of the model
         all_features = self.MLP_layer(hg)
+
+        #print("all features: ", all_features)
         return all_features
 
     def build_attention_mask(self, g):
@@ -152,15 +180,20 @@ class ExampleWrapper(L.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):
-        y = batch[1]
-        batch_g = batch[0]
-        initial_time = time()
+        y = batch[1]        # labels
+        batch_g = batch[0]  # graph input data
+        # initial_time = time() useless
         mask, labels = self.build_attention_mask(batch_g)
+        #print("y: ", y)
+        #print("batch_g: ", batch_g)
+        h_np = batch_g.ndata["h"].cpu().numpy()
+        #print("content ", h_np[:10])
 
         if self.trainer.is_global_zero:
             model_output = self(batch_g, batch_idx, mask, labels)
         else:
             model_output = self(batch_g, 1, mask, labels)
+
 
         loss = self.loss_crit(
                 self.m(model_output),
@@ -176,6 +209,7 @@ class ExampleWrapper(L.LightningModule):
             wandb.log({"accuracy": acc.item()})
         self.loss_final = loss.item() + self.loss_final
         self.number_b = self.number_b + 1
+        # print("output: ", model_output)
         del model_output
         return loss
 
@@ -186,10 +220,24 @@ class ExampleWrapper(L.LightningModule):
         batch_g = batch[0]
         mask, labels = self.build_attention_mask(batch_g)
         model_output = self(batch_g, 1, mask, labels)
+        #if y == 0 (pi0) then [1,0], if y == 1 (photon) then [0,1]
         loss = self.loss_crit(
-            torch.sigmoid(model_output),
+            #torch.sigmoid(model_output),
+            self.m(model_output),
             1.0 * F.one_hot(y.view(-1).long(), num_classes=2),
         )
+        ##for i in range(len(y)):
+        ##    true_label = y[i].item()
+        ##    col0_score = model_output[i, 0].item()
+        ##    col1_score = model_output[i, 1].item()
+        ##    
+        ##    # Determine what true_label represents
+        ##    true_class = "pi0" if true_label == 0 else "photon"
+        ##    
+        ##    print(f"Sample {i}:")
+        ##    print(f"  True label: {true_label} ({true_class})")
+        ##    print(f"  Column 0 score: {col0_score:6.3f}")
+        ##    print(f"  Column 1 score: {col1_score:6.3f}")
 
         model_output1 = model_output
         if self.args.predict:
@@ -203,12 +251,14 @@ class ExampleWrapper(L.LightningModule):
             #     # "energy": y.E.detach().cpu().view(-1),
             # }
             d = {
-                "rho": model_output1.detach().cpu()[:, 0].view(-1),
-                "pi": model_output1.detach().cpu()[:, 1].view(-1),
+                "pi0": model_output1.detach().cpu()[:, 0].view(-1),
+                "photon": model_output1.detach().cpu()[:, 1].view(-1),
                 "labels_true": y.detach().cpu().view(-1),
             }
             df = pd.DataFrame(data=d)
             self.eval_df.append(df)
+
+
 
         # if self.trainer.is_global_zero:
         # print(model_output)
@@ -229,6 +279,21 @@ class ExampleWrapper(L.LightningModule):
                 )
             }
         )
+
+        # Apply softmax to get probabilities
+        probs = torch.softmax(model_output, dim=1)
+    
+        # Log ROC curve
+        wandb.log(
+            {
+                "roc_curve": wandb.plot.roc_curve(
+                    y_true=y.view(-1).detach().cpu().numpy(),
+                    y_probas=probs.detach().cpu().numpy(),
+                    labels=["pi0", "photon"]  # Or ["0", "1"] if you prefer, but check the order
+                )
+            }   
+        )
+
 
         del loss
         del model_output
@@ -251,17 +316,10 @@ class ExampleWrapper(L.LightningModule):
             df_batch1 = pd.concat(self.eval_df)
             df_batch1.to_pickle(self.args.model_prefix + "/model_output_eval_logits.pt")
 
-    # def on_after_backward(self):
-    #     for name, p in self.named_parameters():
-    #         if p.grad is None:
-    #             print(name)
-
     def make_mom_zero(self):
         if self.current_epoch > 1 or self.args.predict:
             print("making momentum 0")
             self.ScaledGooeyBatchNorm2_1.momentum = 0
-
-    # def on_validation_epoch_end(self):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(
@@ -279,30 +337,6 @@ class ExampleWrapper(L.LightningModule):
                 # multiple of "trainer.check_val_every_n_epoch".
             },
         }
-
-
-def obtain_batch_numbers_tau(g):
-    graphs_eval = dgl.unbatch(g)
-    number_graphs = len(graphs_eval)
-    batch_numbers = []
-    counter_index = 0
-    for index in range(0, number_graphs):
-        gj = graphs_eval[index]
-        number_of_graphs = torch.unique(gj.ndata["tau_label"])
-        for el in range(0, len(number_of_graphs)):
-            g1_number_of_nodes = torch.sum(
-                gj.ndata["tau_label"] == number_of_graphs[el]
-            )
-            batch_numbers.append(
-                counter_index
-                * torch.ones(g1_number_of_nodes).to(gj.ndata["tau_label"].device)
-            )
-            counter_index = counter_index + 1
-
-    batch = torch.cat(batch_numbers, dim=0)
-    return batch
-
-
 
 
 def obtain_batch_numbers(g):
