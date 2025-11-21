@@ -1,7 +1,10 @@
 import torch
 
+# This is the wrapper 
+
+
 # from src.models.gravnet_3_tracking import GravnetModel
-from src.models.GATr.Gatr_pf_e_binary import ExampleWrapper as GravnetModel
+from src.models.GATr.Gatr_pf_e_binary import ExampleWrapper as GATrModel
 
 # from src.models.point_transformer.point_transformer import (
 #     PointTransformerOC as GravnetModel,
@@ -10,8 +13,8 @@ from src.models.GATr.Gatr_pf_e_binary import ExampleWrapper as GravnetModel
 
 class GraphTransformerNetWrapper(torch.nn.Module):
     def __init__(self, args, dev, **kwargs) -> None:
-        super().__init__()
-        self.mod = GravnetModel(args, dev, **kwargs)
+        super().__init__()  # constructor of parent class
+        self.mod = GATrModel(args, dev, **kwargs)
 
     def forward(self, g, step_count):
         return self.mod(g, step_count)
