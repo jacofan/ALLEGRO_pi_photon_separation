@@ -25,8 +25,9 @@ def main():
     # parse arguments 
     args = parser.parse_args()
     torch.autograd.set_detect_anomaly(True)
-   
+    # training or prediction
     training_mode = not args.predict
+
     args.local_rank = 0
     # get dataloader 
     if training_mode:
@@ -36,7 +37,7 @@ def main():
     else:
         args = get_samples_steps_per_epoch(args)
         test_loaders, data_config = test_load(args)
-    args.is_muons = True
+
     # Set up model
     model = model_setup(args, data_config)
     gpus, dev = set_gpus(args)
@@ -46,8 +47,9 @@ def main():
         project=args.wandb_projectname,
         entity=args.wandb_entity,
         name=args.wandb_displayname,
-        log_model="all",
-        save_dir="/gpfs/projects/ehpc399/jfanini/wandb-output",
+        # log_model="all",   if offline set True, this must be commented
+        save_dir="/gpfs/projects/ehpc399/jfanini/wandb-output/",
+        offline="True"
     )
     # wandb_logger.experiment.config.update(args)
 
@@ -64,9 +66,9 @@ def main():
             default_root_dir=args.model_prefix,
             logger=wandb_logger,
             max_epochs=args.num_epochs,
-            # strategy="ddp",
-            limit_train_batches=5, #! It is important that all gpus have the same number of batches, adjust this number acoordingly
-            limit_val_batches=5,
+            # strategy="ddp",  # needed when using multiples gpus
+            ## limit_train_batches=5, #! It is important that all gpus have the same number of batches, adjust this number acoordingly
+            ## limit_val_batches=5,
         )
         args.local_rank = trainer.global_rank
         train_loader, val_loader, data_config, train_input_names = train_load(args)
@@ -86,7 +88,7 @@ def main():
         trainer = L.Trainer(
             callbacks=get_callbacks_eval(args),
             accelerator="gpu",
-            devices=[3],
+            devices=[0],
             default_root_dir=args.model_prefix,
             logger=wandb_logger,
         )
