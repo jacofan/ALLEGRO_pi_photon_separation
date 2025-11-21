@@ -217,13 +217,14 @@ class ExampleWrapper(L.LightningModule):
         
         self.validation_step_outputs = []
         y = batch[1]
+        print("y ", y)
         batch_g = batch[0]
         mask, labels = self.build_attention_mask(batch_g)
-        model_output = self(batch_g, 1, mask, labels)
+        model_output_val = self(batch_g, 1, mask, labels)
         #if y == 0 (pi0) then [1,0], if y == 1 (photon) then [0,1]
         loss = self.loss_crit(
             #torch.sigmoid(model_output),
-            self.m(model_output),
+            self.m(model_output_val),
             1.0 * F.one_hot(y.view(-1).long(), num_classes=2),
         )
         ##for i in range(len(y)):
@@ -239,7 +240,6 @@ class ExampleWrapper(L.LightningModule):
         ##    print(f"  Column 0 score: {col0_score:6.3f}")
         ##    print(f"  Column 1 score: {col1_score:6.3f}")
 
-        model_output1 = model_output
         if self.args.predict:
             # d = {
             #     "pi": model_output1.detach().cpu()[:, 0].view(-1),
@@ -251,11 +251,13 @@ class ExampleWrapper(L.LightningModule):
             #     # "energy": y.E.detach().cpu().view(-1),
             # }
             d = {
-                "pi0": model_output1.detach().cpu()[:, 0].view(-1),
-                "photon": model_output1.detach().cpu()[:, 1].view(-1),
+                "pi0": model_output_val.detach().cpu()[:, 0].view(-1),
+                "photon": model_output_val.detach().cpu()[:, 1].view(-1),
                 "labels_true": y.detach().cpu().view(-1),
             }
+
             df = pd.DataFrame(data=d)
+            print("dataframe: ", df)
             self.eval_df.append(df)
 
 
@@ -263,44 +265,49 @@ class ExampleWrapper(L.LightningModule):
         # if self.trainer.is_global_zero:
         # print(model_output)
         # print(labels_true)
-        wandb.log({"loss_val": loss.item()})
-        acc = torch.mean(1.0 * (model_output.argmax(axis=1) == y.view(-1)))
+        wandb.log({"loss_validation": loss.item()})
+
+        acc = torch.mean(1.0 * (model_output_val.argmax(axis=1) == y.view(-1)))
         # print(acc)
-        wandb.log({"accuracy val ": acc.item()})
+        wandb.log({"accuracy_validation ": acc.item()})
 
         # if self.trainer.is_global_zero:
         wandb.log(
             {
-                "conf_mat": wandb.plot.confusion_matrix(
+                "confusion matrix": wandb.plot.confusion_matrix(
                     probs=None,
                     y_true=y.view(-1).detach().cpu().numpy(),
-                    preds=model_output.argmax(axis=1).view(-1).detach().cpu().numpy(),
+                    preds=model_output_val.argmax(axis=1).view(-1).detach().cpu().numpy(),
                     class_names=["0", "1"],
                 )
             }
         )
 
         # Apply softmax to get probabilities
-        probs = torch.softmax(model_output, dim=1)
+        probs = torch.softmax(model_output_val, dim=1)
     
+        print("y_true: ", y.view(-1).detach().cpu().numpy())
+        print("y_probas ", probs.detach().cpu().numpy())
+
         # Log ROC curve
         wandb.log(
             {
-                "roc_curve": wandb.plot.roc_curve(
+                "roc curve": wandb.plot.roc_curve(
                     y_true=y.view(-1).detach().cpu().numpy(),
                     y_probas=probs.detach().cpu().numpy(),
-                    labels=["pi0", "photon"]  # Or ["0", "1"] if you prefer, but check the order
+                    labels=["0", "1"]  # Or ["0", "1"] if you prefer, but check the order
                 )
             }   
         )
 
 
         del loss
-        del model_output
+        del model_output_val
 
+    # hook called at the end of every training epoch
     def on_train_epoch_end(self):
-
-        self.log("train_loss_epoch", self.loss_final / self.number_b)
+        # total loss across batches in the epoch / number of batches 
+        self.log("train loss epoch", self.loss_final / self.number_b)
 
     def on_train_epoch_start(self):
         # if self.trainer.is_global_zero and self.current_epoch == 0:
@@ -320,10 +327,11 @@ class ExampleWrapper(L.LightningModule):
         if self.current_epoch > 1 or self.args.predict:
             print("making momentum 0")
             self.ScaledGooeyBatchNorm2_1.momentum = 0
+            
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(
-            filter(lambda p: p.requires_grad, self.parameters()), lr=1e-3
+            filter(lambda p: p.requires_grad, self.parameters()), lr=self.args.start_lr
         )
         print("Optimizer params:", filter(lambda p: p.requires_grad, self.parameters()))
         return {
@@ -331,7 +339,7 @@ class ExampleWrapper(L.LightningModule):
             "lr_scheduler": {
                 "scheduler": ReduceLROnPlateau(optimizer, patience=3),
                 "interval": "epoch",
-                "monitor": "train_loss_epoch",
+                "monitor": "train loss epoch",
                 "frequency": 1
                 # If "monitor" references validation metrics, then "frequency" should be set to a
                 # multiple of "trainer.check_val_every_n_epoch".
