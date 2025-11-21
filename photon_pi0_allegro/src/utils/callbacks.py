@@ -7,12 +7,13 @@ from lightning.pytorch.callbacks import (
 from lightning.pytorch.profilers import AdvancedProfiler
 from src.layers.utils_training import FreezeClustering
 
+# callbacks for training step
 def get_callbacks(args):
     checkpoint_callback = ModelCheckpoint(
                 dirpath=args.model_prefix,  # checkpoints_path, # <--- specify this on the trainer itself for version control
                 filename="_{epoch}_{step}",
-                # every_n_epochs=val_every_n_epochs,
-                every_n_train_steps=500,
+                every_n_epochs=1,
+                #every_n_train_steps=500,
                 save_top_k=-1,  # <--- this is important!
                 save_weights_only=True,
             )
@@ -35,6 +36,8 @@ def get_callbacks(args):
 
 #profiler = AdvancedProfiler(dirpath="/eos/home-g/gkrzmanc/profiler/", fgatr_pf_eilename="profiler_eval_0705")
 #print("USING PROFILER")
+
+#callbacks for evaluation step
 def get_callbacks_eval(args):
     callbacks=[TQDMProgressBar(refresh_rate=1)]
     return callbacks
