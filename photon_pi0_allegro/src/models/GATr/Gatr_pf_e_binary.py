@@ -69,9 +69,16 @@ class ExampleWrapper(L.LightningModule):
         self.gatr = GATr(
             in_mv_channels = 1,
             out_mv_channels = 1,
+
+            #multivector channels: 16-components geometric algebra objects, to capture spatial infos
             hidden_mv_channels = hidden_mv_channels,
-            in_s_channels = 3,
-            out_s_channels = 1,
+
+            # scalar channels: no geometric structure, should be used to capture non geometric properties (energy?)
+            ## in_s_channels = 3,
+            ## out_s_channels = 1,
+            in_s_channels = None,
+            out_s_channels = None,
+
             hidden_s_channels = hidden_s_channels,
             num_blocks = blocks,
             attention = SelfAttentionConfig(),  # Use default parameters for attention
@@ -113,6 +120,10 @@ class ExampleWrapper(L.LightningModule):
 
         #print("inputs: ", position)
         #print(position.size())
+        
+        
+        
+        
         #print("inputs_scalar: ", energy)
         #print(energy.size())
 
@@ -126,7 +137,7 @@ class ExampleWrapper(L.LightningModule):
         embedded_inputs = embed_point(inputs) + embed_scalar(energy)
         #print("embedded_inputs: ", embedded_inputs)
         #print("size embedded_inputs: ", embedded_inputs.size())
-
+        scalars = torch.zeros((inputs.shape[0], 1))
         # dim: (batch_size*num_points, 1, 16)
         embedded_inputs = embedded_inputs.unsqueeze(-2)  
 
@@ -135,9 +146,9 @@ class ExampleWrapper(L.LightningModule):
         #print("size unsq_embedded_inputs: ", embedded_inputs.size())
 
         
-        # Pass data through GATr, _ is thre attention weight (ignored)
+        # Pass data through GATr, _ is the attention weight (ignored)
         embedded_outputs, _ = self.gatr(
-            embedded_inputs, scalars=None, attention_mask=mask
+            embedded_inputs, scalars = scalars, attention_mask=mask
         )  # (..., num_points, 1, 16)
         
         # new embedding for each node, assigned to the new vector "h_"
@@ -145,6 +156,7 @@ class ExampleWrapper(L.LightningModule):
         g.ndata["h_"] = embedded_outputs[:, 0, :]
         #print("g.ndata[h_]: ", g.ndata["h_"])
         #print("size: ", g.ndata["h_"].size())
+        
         #dim: (batch_size, 16), after sum pooling
         hg = dgl.sum_nodes(g, "h_")
         #print("hg: ", hg)
@@ -179,33 +191,50 @@ class ExampleWrapper(L.LightningModule):
             batch_numbers,
         )
 
+
     def training_step(self, batch, batch_idx):
+        # a batch is grouping several events 
+
         y = batch[1]        # labels
         batch_g = batch[0]  # graph input data
         # initial_time = time() useless
-        mask, labels = self.build_attention_mask(batch_g)
-        #print("y: ", y)
-        #print("batch_g: ", batch_g)
-        h_np = batch_g.ndata["h"].cpu().numpy()
-        #print("content ", h_np[:10])
 
+        # this mask allows to connect different hits (since they are part of the same cluster)
+        # mask is a block diagonal matrix telling the cumulative starting position of each graph's node sequence in the batch
+        mask, labels = self.build_attention_mask(batch_g)
+        #print("mask: ", mask)
+        #print("labels: ", labels)
+        # print("y: ", y)
+        # print("batch_g: ", batch_g)
+        h_np = batch_g.ndata["h"].cpu().numpy()
+        #print("content ", h_np)
+        #print("content size ", h_np.shape)
+
+        # this is the "forward" step!
         if self.trainer.is_global_zero:
             model_output = self(batch_g, batch_idx, mask, labels)
         else:
             model_output = self(batch_g, 1, mask, labels)
 
 
+        #model_output = self(batch_g, batch_idx, mask, labels)
+
+        # loss calculation
         loss = self.loss_crit(
                 self.m(model_output),
                 1.0 * F.one_hot(y.view(-1).long(), num_classes=2),
             )
         
-        
+        #print("model_output: ", model_output)
+        #print("model_output_argmax: ", model_output.argmax(axis=1))
+        #print("y: ", y)
+        #print("y.view(-1): ", y.view(-1))
+
         if self.trainer.is_global_zero:
             wandb.log({"loss": loss.item()})
-            acc = torch.mean(
-                1.0 * (model_output.argmax(axis=1) == y.view(-1))
-            )
+            # accuracy computation: model_output.argmax(axis=1) picks the index of largest value per row (the predicted class)
+            # then, this is compared with true labels, giving a boolean tensor, which is multiplied by one (true = 1, false = 0) and then averaged
+            acc = torch.mean(1.0 * (model_output.argmax(axis=1) == y.view(-1)))
             wandb.log({"accuracy": acc.item()})
         self.loss_final = loss.item() + self.loss_final
         self.number_b = self.number_b + 1
@@ -217,7 +246,7 @@ class ExampleWrapper(L.LightningModule):
         
         self.validation_step_outputs = []
         y = batch[1]
-        print("y ", y)
+        #print("y ", y)
         batch_g = batch[0]
         mask, labels = self.build_attention_mask(batch_g)
         model_output_val = self(batch_g, 1, mask, labels)
@@ -257,48 +286,49 @@ class ExampleWrapper(L.LightningModule):
             }
 
             df = pd.DataFrame(data=d)
-            print("dataframe: ", df)
+            #print("dataframe: ", df)
             self.eval_df.append(df)
 
 
 
-        # if self.trainer.is_global_zero:
-        # print(model_output)
-        # print(labels_true)
-        wandb.log({"loss_validation": loss.item()})
+        if self.trainer.is_global_zero:
+            # print(model_output)
+            # print(labels_true)
+            wandb.log({"loss_validation": loss.item()})
 
-        acc = torch.mean(1.0 * (model_output_val.argmax(axis=1) == y.view(-1)))
-        # print(acc)
-        wandb.log({"accuracy_validation ": acc.item()})
+            acc = torch.mean(1.0 * (model_output_val.argmax(axis=1) == y.view(-1)))
+            # print(acc)
+            wandb.log({"accuracy_validation ": acc.item()})
 
-        # if self.trainer.is_global_zero:
-        wandb.log(
-            {
-                "confusion matrix": wandb.plot.confusion_matrix(
-                    probs=None,
-                    y_true=y.view(-1).detach().cpu().numpy(),
-                    preds=model_output_val.argmax(axis=1).view(-1).detach().cpu().numpy(),
-                    class_names=["0", "1"],
-                )
-            }
-        )
+            # if self.trainer.is_global_zero:
+            wandb.log(
+                {
+                    "confusion matrix": wandb.plot.confusion_matrix(
+                        probs=None,
+                        y_true=y.view(-1).detach().cpu().numpy(),
+                        preds=model_output_val.argmax(axis=1).view(-1).detach().cpu().numpy(),
+                        class_names=["0", "1"],
+                    )
+                }
+            )
 
-        # Apply softmax to get probabilities
-        probs = torch.softmax(model_output_val, dim=1)
-    
-        print("y_true: ", y.view(-1).detach().cpu().numpy())
-        print("y_probas ", probs.detach().cpu().numpy())
+            # Apply softmax to get probabilities
+            probs = torch.softmax(model_output_val, dim=1)
 
-        # Log ROC curve
-        wandb.log(
-            {
-                "roc curve": wandb.plot.roc_curve(
-                    y_true=y.view(-1).detach().cpu().numpy(),
-                    y_probas=probs.detach().cpu().numpy(),
-                    labels=["0", "1"]  # Or ["0", "1"] if you prefer, but check the order
-                )
-            }   
-        )
+            # y true and y tensor are the same object
+            #print("y_true_valid: ", y.view(-1).detach().cpu().numpy())
+            #print("y_probas_valid ", probs.detach().cpu().numpy())
+
+            # Log ROC curve
+            wandb.log(
+                {
+                    "roc curve": wandb.plot.roc_curve(
+                        y_true=y.view(-1).detach().cpu().numpy(),
+                        y_probas=probs.detach().cpu().numpy(),
+                        #labels=["0", "1"]  # Or ["0", "1"] if you prefer, but check the order
+                    )
+                }   
+            )
 
 
         del loss
@@ -328,7 +358,7 @@ class ExampleWrapper(L.LightningModule):
             print("making momentum 0")
             self.ScaledGooeyBatchNorm2_1.momentum = 0
             
-
+    # Optimizer is Adam, scheduler is ReduceLROnPlateau
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(
             filter(lambda p: p.requires_grad, self.parameters()), lr=self.args.start_lr
@@ -346,9 +376,11 @@ class ExampleWrapper(L.LightningModule):
             },
         }
 
-
+# return a tensor containing numbers from0 to batch_dim
+# to connect different hits (=graphs) in the same cluster ("number" in the batch)
 def obtain_batch_numbers(g):
     graphs_eval = dgl.unbatch(g)
+    #print("graphs_eval: ", graphs_eval)
     number_graphs = len(graphs_eval)
     batch_numbers = []
     for index in range(0, number_graphs):
@@ -357,4 +389,7 @@ def obtain_batch_numbers(g):
         batch_numbers.append(index * torch.ones(num_nodes))
         num_nodes = gj.number_of_nodes()
     batch = torch.cat(batch_numbers, dim=0)
+    #print("batch: ", batch)
+    #print("batch size: ", batch.size())
+
     return batch

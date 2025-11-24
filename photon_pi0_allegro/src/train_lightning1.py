@@ -42,6 +42,8 @@ def main():
     model = model_setup(args, data_config)
     gpus, dev = set_gpus(args)
     #profiler = AdvancedProfiler(dirpath=".", filename="perf_logs_28112024")
+    
+    
     # start logger
     wandb_logger = WandbLogger(
         project=args.wandb_projectname,
@@ -66,7 +68,7 @@ def main():
             default_root_dir=args.model_prefix,
             logger=wandb_logger,
             max_epochs=args.num_epochs,
-            # strategy="ddp",  # needed when using multiples gpus
+            strategy="ddp",  # needed when using multiples gpus
             ## limit_train_batches=5, #! It is important that all gpus have the same number of batches, adjust this number acoordingly
             ## limit_val_batches=5,
         )
