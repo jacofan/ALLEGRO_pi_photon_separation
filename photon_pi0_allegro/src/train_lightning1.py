@@ -25,17 +25,14 @@ def main():
     # parse arguments 
     args = parser.parse_args()
     torch.autograd.set_detect_anomaly(True)
-    # training or prediction
     training_mode = not args.predict
-
+    args = get_samples_steps_per_epoch(args)
     args.local_rank = 0
-    # get dataloader 
+
     if training_mode:
         args.data_train = glob.glob(args.data_train[0]+ "*.parquet")
-        args = get_samples_steps_per_epoch(args)
-        train_loader, val_loader, data_config, train_input_names = train_load(args)
+        train_loader, val_loader, data_config, train_input_names = train_load(args) 
     else:
-        args = get_samples_steps_per_epoch(args)
         test_loaders, data_config = test_load(args)
 
     # Set up model
@@ -49,7 +46,7 @@ def main():
         project=args.wandb_projectname,
         entity=args.wandb_entity,
         name=args.wandb_displayname,
-        # log_model="all",   if offline set True, this must be commented
+        # log_model="all",   # if offline=True, this must be commented
         save_dir="/gpfs/projects/ehpc399/jfanini/wandb-output/",
         offline="True"
     )
@@ -69,11 +66,13 @@ def main():
             logger=wandb_logger,
             max_epochs=args.num_epochs,
             strategy="ddp",  # needed when using multiples gpus
+
+            # check the two below
             ## limit_train_batches=5, #! It is important that all gpus have the same number of batches, adjust this number acoordingly
             ## limit_val_batches=5,
         )
         args.local_rank = trainer.global_rank
-        train_loader, val_loader, data_config, train_input_names = train_load(args)
+        # train_loader, val_loader, data_config, train_input_names = train_load(args) called already before
 
         trainer.fit(
             model=model,
