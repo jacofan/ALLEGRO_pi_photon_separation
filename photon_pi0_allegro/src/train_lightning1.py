@@ -48,12 +48,14 @@ def main():
         name=args.wandb_displayname,
         # log_model="all",   # if offline=True, this must be commented
         save_dir="/gpfs/projects/ehpc399/jfanini/wandb-output/",
-        offline="True"
+        offline="True",
     )
     # wandb_logger.experiment.config.update(args)
 
     # Training
     if training_mode:
+
+        # Needed for inference, but then why is in training_mode?
         if args.load_model_weights is not None:
             model = load_train_model(args, dev)
 
@@ -66,8 +68,9 @@ def main():
             logger=wandb_logger,
             max_epochs=args.num_epochs,
             strategy="ddp",  # needed when using multiples gpus
+            num_sanity_val_steps=0, # maybe to be commented out
 
-            # check the two below
+            # not clear
             ## limit_train_batches=5, #! It is important that all gpus have the same number of batches, adjust this number acoordingly
             ## limit_val_batches=5,
         )
@@ -81,7 +84,7 @@ def main():
         )
 
         
-    # Evaluating
+    # Evaluating: laoding weights 
     if args.data_test:
         if args.load_model_weights:
             model = load_test_model(args, dev)
@@ -93,6 +96,8 @@ def main():
             default_root_dir=args.model_prefix,
             logger=wandb_logger,
         )
+
+        #### This part I think I don't need, and the if is doing nothing
         if args.correction:
             for name, get_test_loader in test_loaders.items():
                 test_loader = get_test_loader()
@@ -109,7 +114,9 @@ def main():
                     # ckpt_path=args.load_model_weights,
                     dataloaders=test_loader,
                 )
+        ####
 
 
 if __name__ == "__main__":
+    L.seed_everything(42, workers=True)   # might be useful when running parallel processes?
     main()
