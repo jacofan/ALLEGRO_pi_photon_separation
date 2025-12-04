@@ -32,6 +32,7 @@ import pandas as pd
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import roc_auc_score
 import matplotlib.pyplot as plt
+
 from sklearn.metrics import roc_curve, roc_auc_score
 
 # This is not a wrapper: this is the model!!!
@@ -92,11 +93,9 @@ class ExampleWrapper(L.LightningModule):
 
 
         self.readout = "sum"   # sum pooling: add features over all points
-        self.MLP_layer = MLPReadout(16, 2)   # gives the final output decision
+        self.MLP_layer = MLPReadout(16, 2)   # gives the final output decision, first column for index 0, second for index 1
 
-    ## def obtain_loss_weighted(self, labels_true):
-    ## 
-    ##     self.loss_crit = nn.BCELoss()
+
 
     def forward(self, g, step_count, mask, labels, eval="", return_train=False):
         """Forward pass.
@@ -111,15 +110,14 @@ class ExampleWrapper(L.LightningModule):
         outputs : torch.Tensor with shape (*batch_dimensions, 1)
             Model prediction: a single scalar for the whole point cloud.
         """
-
         # node features → transformer → node embeddings → sum pooling → hg → MLP → output
 
         # g is a graph object, .ndata to access the node features. every node has a feature vector h
         # tensor of hit position x,y,z 
-        position = g.ndata["h"][:,1:]   
+        position = g.ndata["h"][:,1:].contiguous()   
         # tensor of hit energy
         # view reshapes the tensor
-        energy = g.ndata["h"][:,0].view(-1, 1)   
+        energy = g.ndata["h"][:,0].contiguous().view(-1, 1)  
 
         #print("inputs: ", position)
         #print(position.size())
@@ -138,7 +136,7 @@ class ExampleWrapper(L.LightningModule):
         scalars = torch.zeros((inputs.shape[0], 1))
 
         # dim: (batch_size*num_points, 1, 16)
-        embedded_inputs = embedded_inputs.unsqueeze(-2)  
+        embedded_inputs = embedded_inputs.unsqueeze(-2).contiguous()  
 
         #print("unsq_embedded_inputs: ", embedded_inputs)
         #print("size unsq_embedded_inputs: ", embedded_inputs.size())
@@ -150,13 +148,13 @@ class ExampleWrapper(L.LightningModule):
         
         # new embedding for each node, assigned to the new vector "h_"
         #dim: (batch_size*num_points, 16)
-        g.ndata["h_"] = embedded_outputs[:, 0, :]
+        g.ndata["h_"] = embedded_outputs[:, 0, :].contiguous()
 
         #print("g.ndata[h_]: ", g.ndata["h_"])
         #print("size: ", g.ndata["h_"].size())
         
         #dim: (batch_size, 16), after sum pooling of all the embeddings
-        hg = dgl.sum_nodes(g, "h_")
+        hg = dgl.sum_nodes(g, "h_").contiguous()
 
         #print("hg: ", hg)
         #print("size: ", hg.size())
@@ -192,33 +190,33 @@ class ExampleWrapper(L.LightningModule):
 
 
     def training_step(self, batch, batch_idx):
-
-        # a batch is grouping several events 
+        # print(f"TRAIN: Rank {self.trainer.global_rank} / World Size {self.trainer.world_size} is running batch {batch_idx}")
+        # batch = grouping several events 
         y = batch[1]        # labels
         batch_g = batch[0]  # graph input data
 
-        # this mask allows to connect different hits (since they are part of the same cluster)
-        # mask is a block diagonal matrix telling the cumulative starting position of each graph's node sequence in the batch
+        # mask = allows to connect different hits (since they are part of the same cluster)
+        # block diagonal matrix telling the cumulative starting position of each graph's node sequence in the batch
         mask, labels = self.build_attention_mask(batch_g)
 
         #print("mask: ", mask)
         #print("labels: ", labels)
-        # print("y: ", y)
-        # print("batch_g: ", batch_g)
+        #print("y: ", y)
+        #print("batch_g: ", batch_g)
 
         h_np = batch_g.ndata["h"].cpu().numpy()
         #print("h_np ", h_np)
         #print("h_np size ", h_np.shape)
 
         # this is the "forward" step!
-        #not clear why need to differentiate
+        # not clear why need to differentiate
         if self.trainer.is_global_zero:
             model_output = self(batch_g, batch_idx, mask, labels)
         else:
             model_output = self(batch_g, 1, mask, labels)
 
         # Can't we just do:    
-        #model_output = self(batch_g, batch_idx, mask, labels)
+        # model_output = self(batch_g, batch_idx, mask, labels)
 
         # loss calculation
         loss = self.loss_crit(
@@ -226,64 +224,63 @@ class ExampleWrapper(L.LightningModule):
                 1.0 * F.one_hot(y.view(-1).long(), num_classes=2),
             )
         
+        acc = torch.mean(1.0 * (model_output.argmax(axis=1) == y.view(-1)))
+        self.log('loss', loss, on_step=True, on_epoch=False, sync_dist=True)
+        # Log accuracy: on_step=False (per epoch average), on_epoch=True
+        self.log('train_acc', acc, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('train loss epoch', loss, on_step=False, on_epoch=True, sync_dist=True)
+
         #print("model_output: ", model_output)
         #print("model_output_argmax: ", model_output.argmax(axis=1))
         #print("y: ", y)
         #print("y.view(-1): ", y.view(-1))
-
-
-        if self.trainer.is_global_zero:
-            wandb.log({"loss": loss.item()})
-
-            # accuracy computation: model_output.argmax(axis=1) picks the index of largest value per row (the predicted class)
-            # then, this is compared with true labels, giving a boolean tensor, which is multiplied by one (true = 1, false = 0) and then averaged
-            acc = torch.mean(1.0 * (model_output.argmax(axis=1) == y.view(-1)))
-            wandb.log({"accuracy": acc.item()})
-
-        self.loss_final = loss.item() + self.loss_final
-        self.number_b = self.number_b + 1
-        # print("output: ", model_output)
+        
+## this was present in original implementation
+        ##if self.trainer.is_global_zero:
+            # wandb.log({"loss": loss.item()})
+##
+        ##    # accuracy computation: model_output.argmax(axis=1) picks the index of largest value per row (the predicted class)
+        ##    # then, this is compared with true labels, giving a boolean tensor, which is multiplied by one (true = 1, false = 0) and then averaged
+        ##    acc = torch.mean(1.0 * (model_output.argmax(axis=1) == y.view(-1)))
+        ##    # wandb.log({"accuracy": acc.item()})
+        ##    wandb.log({"loss": loss.item()})
+        ##    wandb.log({"accuracy": acc.item()})
+##
+        ## self.loss_final = loss.item() + self.loss_final
+        ## self.number_b = self.number_b + 1
+        ## # print("output: ", model_output)
+##
         del model_output
         return loss
 
+
+
     def validation_step(self, batch, batch_idx):
         
-        # self.validation_step_outputs = [] useless?
+        self.validation_step_outputs = [] # useless?
         y = batch[1] #labels
         batch_g = batch[0] # graph input data
 
         mask, labels = self.build_attention_mask(batch_g)
 
-        # forward step
+        # forward step, why no batch_idx?
         model_output_val = self(batch_g, 1, mask, labels)
 
         # accumulate predictions (all ranks!)
         self.val_logits.append(model_output_val.detach().cpu())
         self.val_labels.append(y.view(-1).detach().cpu())        
 
-        #if y == 0 (pi0) then [1,0], if y == 1 (photon) then [0,1]
+        #if y == 0 (photon) then [1,0], if y == 1 (pi0) then [0,1]
         loss = self.loss_crit(
             #torch.sigmoid(model_output), this was used, but I changed it for consistency with training step
             self.m(model_output_val),
             1.0 * F.one_hot(y.view(-1).long(), num_classes=2),
         )
-        ##for i in range(len(y)):
-        ##    true_label = y[i].item()
-        ##    col0_score = model_output[i, 0].item()
-        ##    col1_score = model_output[i, 1].item()
-        ##    
-        ##    # Determine what true_label represents
-        ##    true_class = "pi0" if true_label == 0 else "photon"
-        ##    
-        ##    print(f"Sample {i}:")
-        ##    print(f"  True label: {true_label} ({true_class})")
-        ##    print(f"  Column 0 score: {col0_score:6.3f}")
-        ##    print(f"  Column 1 score: {col1_score:6.3f}")
 
         if self.args.predict:
             d = {
-                "pi0": model_output_val.detach().cpu()[:, 0].view(-1),
-                "photon": model_output_val.detach().cpu()[:, 1].view(-1),
+                "photon": model_output_val.detach().cpu()[:, 0].view(-1),
+                "pi0": model_output_val.detach().cpu()[:, 1].view(-1),
                 "labels_true": y.detach().cpu().view(-1),
             }
 
@@ -291,47 +288,35 @@ class ExampleWrapper(L.LightningModule):
             #print("dataframe: ", df)
             self.eval_df.append(df)
 
-        if self.trainer.is_global_zero:
+        # if self.trainer.is_global_zero:
+# 
+        #     # print(model_output)
+        #     # print(labels_true)
+        #     
+        #     # in this way, wandb is showing only the last loss/accuracy of the epoch
+        #     wandb.log({"loss_validation": loss.item()})
+# 
+        #     acc = torch.mean(1.0 * (model_output_val.argmax(axis=1) == y.view(-1)))
+        #     # print(acc)
+        #     wandb.log({"accuracy_validation ": acc.item()})
 
-            # print(model_output)
-            # print(labels_true)
-            
-            # in this way, wandb is showing only the last loss/accuracy of the epoch
-            wandb.log({"loss_validation": loss.item()})
 
-            acc = torch.mean(1.0 * (model_output_val.argmax(axis=1) == y.view(-1)))
-            # print(acc)
-            wandb.log({"accuracy_validation ": acc.item()})
 
-            # if self.trainer.is_global_zero:
-        ##    wandb.log(
-        ##        {
-        ##            "confusion matrix": wandb.plot.confusion_matrix(
-        ##                probs=None,
-        ##                y_true=y.view(-1).detach().cpu().numpy(),
-        ##                preds=model_output_val.argmax(axis=1).view(-1).detach().cpu().numpy(),
-        ##                #class_names=["0", "1"],
-        ##            )
-        ##        }
-        ##    )
-##
-        ##    # Apply softmax to get probabilities
-        ##    probs = torch.softmax(model_output_val, dim=1)
-##
-        ##    # y true and y tensor are the same object
-        ##    #print("y_true_valid: ", y.view(-1).detach().cpu().numpy())
-        ##    #print("y_probas_valid ", probs.detach().cpu().numpy())
-##
-        ##    # Log ROC curve
-        ##    wandb.log(
-        ##        {
-        ##            "roc curve": wandb.plot.roc_curve(
-        ##                y_true=y.view(-1).detach().cpu().numpy(),
-        ##                y_probas=probs.detach().cpu().numpy(),
-        ##                #labels=["0", "1"]  # Or ["0", "1"] if you prefer, but check the order
-        ##            )
-        ##        }   
-        ##    )
+        ## if self.trainer.is_global_zero:
+        ##     # wandb.log({"loss": loss.item()})
+## 
+        ##     # accuracy computation: model_output.argmax(axis=1) picks the index of largest value per row (the predicted class)
+        ##     # then, this is compared with true labels, giving a boolean tensor, which is multiplied by one (true = 1, false = 0) and then averaged
+        ##     # wandb.log({"accuracy": acc.item()})
+        ##     wandb.log({"loss_val": loss.item()})
+        ##     wandb.log({"accuracy_val": acc.item()})
+        
+        acc = torch.mean(1.0 * (model_output_val.argmax(axis=1) == y.view(-1)))
+        # Log loss (for epoch-average)
+        self.log("loss_val", loss, on_step=False, on_epoch=True, sync_dist=True)
+        # Log accuracy (for epoch-average)
+        self.log("accuracy_val", acc, on_step=False, on_epoch=True, sync_dist=True)
+
 
 
         del loss
@@ -340,7 +325,10 @@ class ExampleWrapper(L.LightningModule):
     # hook called at the end of every training epoch
     def on_train_epoch_end(self):
         # total loss across batches in the epoch / number of batches 
-        self.log("train loss epoch", self.loss_final / self.number_b, sync_dist=True)
+        ## self.log("train loss epoch", self.loss_final / self.number_b, sync_dist=True)
+        pass 
+
+    
 
 
     def on_train_epoch_start(self):
@@ -356,17 +344,25 @@ class ExampleWrapper(L.LightningModule):
         self.val_logits = []
 
     def on_validation_epoch_end(self):
+        # if prediction, concatenate all batches and print the content in pickle 
         if self.args.predict:
             df_batch1 = pd.concat(self.eval_df)
-            df_batch1.to_pickle(self.args.model_prefix + "/model_output_eval_logits.pt")
+            df_batch1.to_pickle(self.args.model_prefix + "/model_output_eval_logits_gamma_10GeV.pt")
 
         # concatenate different batches 
         logits = torch.cat(self.val_logits)     # local
         labels = torch.cat(self.val_labels)     # local
+        #print(f"Current World Size: {self.trainer.world_size}")
+
+        #print("logits: ", logits)
+        #print("logitss size: ", logits.size())
 
         # gather from all ranks, = processes across different gpus
         logits = self.all_gather(logits)
         labels = self.all_gather(labels)
+
+        #print("logits then: ", logits)
+        #print("logitss size then: ", logits.size())
 
         # only rank 0 (the main process) logs metrics
         if self.trainer.is_global_zero:
@@ -375,78 +371,79 @@ class ExampleWrapper(L.LightningModule):
             logits = logits.reshape(-1, logits.shape[-1])
             labels = labels.reshape(-1)
 
-            # Apply softmax to get probabilities
+            # Apply softmax to get probabilities, maybe should use sigmoid?
             probs = torch.softmax(logits, dim=1)
 
-            # returns the index of the maximum value
+            # returns the index of the maximum value (the prediction)
             preds = probs.argmax(dim=1)
 
-            # print("y_true ", labels.detach().cpu().numpy())
-            # print("y_probas ", probs.detach().cpu().numpy())
-            # print("y_probas[:, 0] ", probs.detach().cpu().numpy()[:, 0])
-            # print("preds ", preds.detach().cpu().numpy())
+            #print("y_true ", labels.detach().cpu().numpy())
+            #print("y_probas ", probs.detach().cpu().numpy())
+            #print("y_probas[:, 0] ", probs.detach().cpu().numpy()[:, 0])
+            #print("preds ", preds.detach().cpu().numpy())
 
             y_truth = labels.detach().cpu().numpy()
-            y_probs_pi0_gamma = probs.detach().cpu().numpy() #first column pi0, second column gamma
+            y_probs_gamma_pi0 = probs.detach().cpu().numpy() #first column gamma, second column pi0
             y_preds = preds.detach().cpu().numpy()
 
-            y_probs_pi0 = y_probs_pi0_gamma[:, 0]
-            y_probs_gamma = y_probs_pi0_gamma[:, 1]
+            y_probs_pi0 = y_probs_gamma_pi0[:, 1]
+            y_probs_gamma = y_probs_gamma_pi0[:, 0]
 
+            #print("y_truth ", y_truth.shape)
+            #print("y_probs_pi0 ", y_probs_pi0.shape)
+            #print("y_probs_gamma ", y_probs_gamma.shape)
+
+            label_map = {0: "photon", 1: "pi0"}
+            y_truth_named = np.array([label_map[int(y)] for y in y_truth])
+
+            # this was in the validation step
             wandb.log({
                 "confusion_matrix": wandb.plot.confusion_matrix(
-                    y_true=y_truth,
+                    y_true=y_truth,         
                     preds=y_preds,
+                    class_names=["photon", "pi0"]
                 )
             })
+            if not self.args.predict:
+                # in y_true gamma = 0, pi0 = 1 
+                auc = roc_auc_score(y_truth, y_probs_pi0)  
+                wandb.log({"auc": auc})
 
-            # Calculate AUC
-            # in y_true pi0 = 0, gamma = 1 
+                wandb.log({
+                    "roc_curve": wandb.plot.roc_curve(
+                        y_true=y_truth_named,
+                        y_probas=y_probs_gamma_pi0,    
+                        labels=["photon", "pi0"]
+                    )
+                })
 
-            auc = roc_auc_score(y_truth, y_probs_gamma)  
-            wandb.log({"auc": auc})
+                fpr, tpr, thresholds = roc_curve(y_truth, y_probs_pi0)
 
-            wandb.log({
-                "roc_curve": wandb.plot.roc_curve(
-                    y_true=y_truth,
-                    y_probas=y_probs_pi0_gamma,
-                    labels=["pi0", "gamma"],
+
+                current_epoch = self.current_epoch 
+
+                plt.figure(figsize=(12, 10))
+                plt.plot(
+                    fpr,
+                    tpr,
+                    color='red',
+                    lw=2,
+                    label=f'ROC curve (AUC = {auc:.4f})',
                 )
-            })
 
-            fpr, tpr, thresholds = roc_curve(y_truth, y_probs_gamma)
+                plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
 
-            # Get the current epoch number for the title/filename
-            current_epoch = self.current_epoch 
+                plt.xlim([0.0, 1.05])
+                plt.ylim([0.0, 1.05])
+                plt.xlabel('False Positive Rate (FPR)')
+                plt.ylabel('True Positive Rate (TPR)')
+                plt.title(f'ROC Curve - Epoch {current_epoch}')
+                plt.legend(loc='lower right', fontsize='small')
+                plt.grid(True)
 
-            # 3. Plot the ROC Curve
-            plt.figure(figsize=(12, 10))
-
-            # Plot ROC curve
-            plt.plot(
-                fpr,
-                tpr,
-                color='red',
-                lw=2,
-                label=f'ROC curve (AUC = {auc:.4f})',
-            )
-
-            # Plot baseline
-            plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-
-            plt.xlim([0.0, 1.05])
-            plt.ylim([0.0, 1.05])
-            plt.xlabel('False Positive Rate (FPR)')
-            plt.ylabel('True Positive Rate (TPR)')
-            plt.title(f'ROC Curve - Epoch {current_epoch}')
-            plt.legend(loc='upper left', fontsize='small')
-            plt.grid(True)
-
-            # 4. Save the Plot
-            # Save the plot with a unique filename for each epoch
-            filename = f"roc_curve_4gpus_epoch_{current_epoch:03d}.png"
-            plt.savefig(filename)
-            plt.close()
+                filename = f"predict/roc.png"
+                plt.savefig(filename)
+                plt.close()
 
 
     def make_mom_zero(self):
@@ -473,7 +470,7 @@ class ExampleWrapper(L.LightningModule):
         }
 
 # return a tensor containing numbers from0 to batch_dim
-# to connect different hits (=graphs) in the same cluster ("number" in the batch)
+# to connect different hits (= graphs) in the same cluster ("number" in the batch)
 def obtain_batch_numbers(g):
     graphs_eval = dgl.unbatch(g)
     #print("graphs_eval: ", graphs_eval)
