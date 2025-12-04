@@ -84,7 +84,7 @@ def main():
         )
 
         
-    # Evaluating: laoding weights 
+    # Evaluating: loading weights 
     if args.data_test:
         if args.load_model_weights:
             model = load_test_model(args, dev)
@@ -97,24 +97,14 @@ def main():
             logger=wandb_logger,
         )
 
-        #### This part I think I don't need, and the if is doing nothing
-        if args.correction:
-            for name, get_test_loader in test_loaders.items():
-                test_loader = get_test_loader()
-                trainer.validate(
-                    model=model,
-                    dataloaders=test_loader,
-                    # ckpt_path=args.load_model_weights,
-                )
-        else:
-            for name, get_test_loader in test_loaders.items():
-                test_loader = get_test_loader()
-                trainer.validate(
-                    model=model,
-                    # ckpt_path=args.load_model_weights,
-                    dataloaders=test_loader,
-                )
-        ####
+        for name, get_test_loader in test_loaders.items():
+            test_loader = get_test_loader()
+            trainer.validate(
+                model=model,
+                # ckpt_path=args.load_model_weights,
+                dataloaders=test_loader,
+            )
+
 
 
 if __name__ == "__main__":
